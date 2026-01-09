@@ -4,6 +4,7 @@ import time
 import random
 import threading
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI
 import gspread
 from google.oauth2.service_account import Credentials
@@ -13,9 +14,10 @@ from contextlib import asynccontextmanager
 # =========================
 # CONFIG
 # =========================
-TICK_INTERVAL = 90  # seconds
+TICK_INTERVAL = 90
 SHEET_NAME = "ALERT"
-MAX_ROWS = 1000  # Google Sheet default limit
+MAX_ROWS = 1000
+TIMEZONE = ZoneInfo("Asia/Kolkata")
 
 # =========================
 # LOGGING
@@ -27,33 +29,46 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =========================
-# GOOGLE SHEET SETUP
+# GOOGLE AUTH (SAFE)
 # =========================
-service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-if not service_account_json:
-    raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON is not set!")
-service_account_info = json.loads(service_account_json)
-
-
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
-CREDS = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
+def load_service_account():
+    # ✅ 1️⃣ Try ENV (Render)
+    env_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if env_json:
+        logger.info("Using GOOGLE_SERVICE_ACCOUNT_JSON from ENV")
+        return json.loads(env_json)
+
+    # ✅ 2️⃣ Fallback to local file (DEV only)
+    if os.path.exists("service_account.json"):
+        logger.info("Using local service_account.json")
+        with open("service_account.json", "r") as f:
+            return json.load(f)
+
+    raise RuntimeError("Google service account credentials not found!")
+
+service_account_info = load_service_account()
+
+CREDS = Credentials.from_service_account_info(
+    service_account_info,
+    scopes=SCOPES
+)
+
 gc = gspread.authorize(CREDS)
+sheet = gc.open(SHEET_NAME).sheet1
 
-try:
-    sheet = gc.open(SHEET_NAME).sheet1
-except gspread.SpreadsheetNotFound:
-    logger.error(f"Spreadsheet '{SHEET_NAME}' not found! Create it first.")
-    raise
-
-# Set headers if empty
-if sheet.row_count == 0 or sheet.cell(1, 1).value != "Timestamp":
+# =========================
+# SHEET INIT
+# =========================
+if sheet.cell(1, 1).value != "Timestamp":
     sheet.clear()
-    sheet.append_row(["Timestamp", "Price", "Action", "PnL", "Total_PnL", "Trade Count"])
-    logger.info("Sheet headers created.")
+    sheet.append_row(
+        ["Timestamp", "Price", "Action", "PnL", "Total_PnL", "Trade Count"]
+    )
 
 # =========================
 # ALGO STATE
@@ -70,19 +85,16 @@ trade_count = 0
 def algo_tick():
     global price, entry_price, in_trade, total_pnl, trade_count
 
-    # simulate price movement
     price += random.uniform(-2, 5)
     action = "NO_ACTION"
     pnl = 0.0
 
-    # ENTRY LOGIC
     if not in_trade and price > 1002:
         in_trade = True
         entry_price = price
         action = "BUY"
         trade_count += 1
 
-    # EXIT LOGIC
     elif in_trade:
         pnl = round((price - entry_price) * 10, 2)
         if pnl >= 80 or pnl <= -40:
@@ -90,47 +102,39 @@ def algo_tick():
             total_pnl += pnl
             action = "EXIT"
 
-    # Ensure Google Sheet has enough rows
     if sheet.row_count >= MAX_ROWS:
         sheet.add_rows(500)
 
-    # Append data to sheet
     row = [
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
         round(price, 2),
         action,
         pnl,
         round(total_pnl, 2),
         trade_count
     ]
-    try:
-        sheet.append_row(row, value_input_option="USER_ENTERED")
-    except Exception as e:
-        logger.error(f"Failed to write to Google Sheet: {e}")
 
+    sheet.append_row(row, value_input_option="USER_ENTERED")
     logger.info(f"[{action}] Price={price:.2f} | PnL={pnl} | Total={total_pnl}")
 
 # =========================
-# MARKET LOOP
+# BACKGROUND LOOP
 # =========================
 def market_loop():
-    logger.info(f"🚀 Auto Algo Started (Tick every {TICK_INTERVAL} sec)")
+    logger.info(f"🚀 Algo Started (every {TICK_INTERVAL}s)")
     while True:
-        try:
-            algo_tick()
-        except Exception as e:
-            logger.error(f"Algo tick error: {e}")
+        algo_tick()
         time.sleep(TICK_INTERVAL)
 
 # =========================
-# FASTAPI APP
+# FASTAPI
 # =========================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     threading.Thread(target=market_loop, daemon=True).start()
     yield
 
-app = FastAPI(title="Algo Demo with Google Sheet", lifespan=lifespan)
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 def status():
