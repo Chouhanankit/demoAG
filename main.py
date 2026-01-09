@@ -4,6 +4,7 @@ import time
 import random
 import threading
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI
 import gspread
 from google.oauth2.service_account import Credentials
@@ -33,7 +34,6 @@ service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 if not service_account_json:
     raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON is not set!")
 service_account_info = json.loads(service_account_json)
-
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -94,9 +94,12 @@ def algo_tick():
     if sheet.row_count >= MAX_ROWS:
         sheet.add_rows(500)
 
+    # Get current IST timestamp
+    current_time = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
+
     # Append data to sheet
     row = [
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        current_time,
         round(price, 2),
         action,
         pnl,
