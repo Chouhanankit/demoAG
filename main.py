@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 # =========================
 # CONFIG
 # =========================
-TICK_INTERVAL = 30  # seconds
+TICK_INTERVAL = 90  # seconds
 SHEET_NAME = "ALERT"
 MAX_ROWS = 1000  # Google Sheet default limit
 
