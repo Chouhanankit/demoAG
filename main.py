@@ -3,11 +3,13 @@ import json
 import time
 import random
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
+from fastapi import FastAPI
 import gspread
 from google.oauth2.service_account import Credentials
 import logging
+from contextlib import asynccontextmanager
 
 # =========================
 # CONFIG
@@ -16,6 +18,9 @@ TICK_INTERVAL = 90
 SHEET_NAME = "ALERT"
 MAX_ROWS = 1000
 TIMEZONE = ZoneInfo("Asia/Kolkata")
+
+MARKET_OPEN = dtime(9, 15)
+MARKET_CLOSE = dtime(15, 30)
 
 # =========================
 # LOGGING
@@ -37,10 +42,15 @@ SCOPES = [
 def load_service_account():
     env_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     if env_json:
-        logger.info("Using Google credentials from ENV")
+        logger.info("Using GOOGLE_SERVICE_ACCOUNT_JSON from ENV")
         return json.loads(env_json)
 
-    raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON not set!")
+    if os.path.exists("service_account.json"):
+        logger.info("Using local service_account.json")
+        with open("service_account.json", "r") as f:
+            return json.load(f)
+
+    raise RuntimeError("Google service account credentials not found!")
 
 service_account_info = load_service_account()
 
@@ -71,10 +81,23 @@ total_pnl = 0.0
 trade_count = 0
 
 # =========================
+# MARKET TIME CHECK
+# =========================
+def is_market_open():
+    now = datetime.now(TIMEZONE)
+    if now.weekday() >= 5:  # Saturday/Sunday
+        return False
+    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
+
+# =========================
 # ALGO LOGIC
 # =========================
-def algo_tick(tick_time: datetime):
+def algo_tick():
     global price, entry_price, in_trade, total_pnl, trade_count
+
+    if not is_market_open():
+        logger.info("⏸ Market Closed — Algo Idle")
+        return
 
     price += random.uniform(-2, 5)
     action = "NO_ACTION"
@@ -96,8 +119,10 @@ def algo_tick(tick_time: datetime):
     if sheet.row_count >= MAX_ROWS:
         sheet.add_rows(500)
 
+    timestamp = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+
     row = [
-        tick_time.strftime("%Y-%m-%d %H:%M:%S"),
+        timestamp,
         round(price, 2),
         action,
         pnl,
@@ -106,29 +131,37 @@ def algo_tick(tick_time: datetime):
     ]
 
     sheet.append_row(row, value_input_option="USER_ENTERED")
-    logger.info(f"[{action}] {tick_time} Price={price:.2f} PnL={pnl}")
+    logger.info(f"[{action}] {timestamp} Price={price:.2f} PnL={pnl}")
 
 # =========================
-# CLOCK-SYNCED LOOP
+# BACKGROUND LOOP
 # =========================
 def market_loop():
-    logger.info("🚀 Background Algo Started (Clock Synced)")
-
-    now = datetime.now(TIMEZONE)
-    next_tick = now - timedelta(
-        seconds=now.timestamp() % TICK_INTERVAL
-    ) + timedelta(seconds=TICK_INTERVAL)
-
+    logger.info("🚀 Background Algo Started (Market Time Filter ON)")
     while True:
-        sleep_seconds = (next_tick - datetime.now(TIMEZONE)).total_seconds()
-        if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
-
-        algo_tick(next_tick)
-        next_tick += timedelta(seconds=TICK_INTERVAL)
+        try:
+            algo_tick()
+        except Exception as e:
+            logger.error(f"Algo error: {e}")
+        time.sleep(TICK_INTERVAL)
 
 # =========================
-# ENTRY POINT 🔥
+# FASTAPI
 # =========================
-if __name__ == "__main__":
-    market_loop()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    threading.Thread(target=market_loop, daemon=True).start()
+    yield
+
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/")
+def status():
+    return {
+        "status": "RUNNING",
+        "market_open": is_market_open(),
+        "price": round(price, 2),
+        "in_trade": in_trade,
+        "total_pnl": round(total_pnl, 2),
+        "trade_count": trade_count
+    }
