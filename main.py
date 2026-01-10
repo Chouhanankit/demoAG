@@ -3,13 +3,11 @@ import json
 import time
 import random
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from fastapi import FastAPI
 import gspread
 from google.oauth2.service_account import Credentials
 import logging
-from contextlib import asynccontextmanager
 
 # =========================
 # CONFIG
@@ -29,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =========================
-# GOOGLE AUTH (SAFE)
+# GOOGLE AUTH
 # =========================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -37,19 +35,12 @@ SCOPES = [
 ]
 
 def load_service_account():
-    # ✅ 1️⃣ Try ENV (Render)
     env_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     if env_json:
-        logger.info("Using GOOGLE_SERVICE_ACCOUNT_JSON from ENV")
+        logger.info("Using Google credentials from ENV")
         return json.loads(env_json)
 
-    # ✅ 2️⃣ Fallback to local file (DEV only)
-    if os.path.exists("service_account.json"):
-        logger.info("Using local service_account.json")
-        with open("service_account.json", "r") as f:
-            return json.load(f)
-
-    raise RuntimeError("Google service account credentials not found!")
+    raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON not set!")
 
 service_account_info = load_service_account()
 
@@ -82,7 +73,7 @@ trade_count = 0
 # =========================
 # ALGO LOGIC
 # =========================
-def algo_tick():
+def algo_tick(tick_time: datetime):
     global price, entry_price, in_trade, total_pnl, trade_count
 
     price += random.uniform(-2, 5)
@@ -106,7 +97,7 @@ def algo_tick():
         sheet.add_rows(500)
 
     row = [
-        datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+        tick_time.strftime("%Y-%m-%d %H:%M:%S"),
         round(price, 2),
         action,
         pnl,
@@ -115,33 +106,29 @@ def algo_tick():
     ]
 
     sheet.append_row(row, value_input_option="USER_ENTERED")
-    logger.info(f"[{action}] Price={price:.2f} | PnL={pnl} | Total={total_pnl}")
+    logger.info(f"[{action}] {tick_time} Price={price:.2f} PnL={pnl}")
 
 # =========================
-# BACKGROUND LOOP
+# CLOCK-SYNCED LOOP
 # =========================
 def market_loop():
-    logger.info(f"🚀 Algo Started (every {TICK_INTERVAL}s)")
+    logger.info("🚀 Background Algo Started (Clock Synced)")
+
+    now = datetime.now(TIMEZONE)
+    next_tick = now - timedelta(
+        seconds=now.timestamp() % TICK_INTERVAL
+    ) + timedelta(seconds=TICK_INTERVAL)
+
     while True:
-        algo_tick()
-        time.sleep(TICK_INTERVAL)
+        sleep_seconds = (next_tick - datetime.now(TIMEZONE)).total_seconds()
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+        algo_tick(next_tick)
+        next_tick += timedelta(seconds=TICK_INTERVAL)
 
 # =========================
-# FASTAPI
+# ENTRY POINT 🔥
 # =========================
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    threading.Thread(target=market_loop, daemon=True).start()
-    yield
-
-app = FastAPI(lifespan=lifespan)
-
-@app.get("/")
-def status():
-    return {
-        "status": "RUNNING",
-        "price": round(price, 2),
-        "in_trade": in_trade,
-        "total_pnl": round(total_pnl, 2),
-        "trade_count": trade_count
-    }
+if __name__ == "__main__":
+    market_loop()
