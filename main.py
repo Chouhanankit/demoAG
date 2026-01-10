@@ -1,91 +1,73 @@
 import os
 import json
+import time
 import threading
 import logging
 from fastapi import FastAPI
-from contextlib import asynccontextmanager
 import gspread
 from google.oauth2.service_account import Credentials
+from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+from algo_logic import algo_tick
+from self_ping import self_ping
 
-from algo_logic import algo_tick, set_sheet
-from self_ping import start_self_ping
-
-# =========================
-# LOGGING
-# =========================
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    level=logging.INFO
-)
+load_dotenv()
 logger = logging.getLogger(__name__)
 
-# =========================
-# CONFIG
-# =========================
-TICK_INTERVAL = 90  # seconds
+# -------------------------
+# Google Sheets setup
+# -------------------------
 SHEET_NAME = "ALERT"
-SELF_URL = os.getenv("SELF_URL")  # set your live URL here or in .env
-
-# =========================
-# GOOGLE SHEET AUTH
-# =========================
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
+MAX_ROWS = 1000
 
 def load_service_account():
     env_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     if env_json:
+        logger.info("Using GOOGLE_SERVICE_ACCOUNT_JSON from ENV")
         return json.loads(env_json)
     if os.path.exists("service_account.json"):
-        with open("service_account.json", "r") as f:
+        logger.info("Using local service_account.json")
+        with open("service_account.json") as f:
             return json.load(f)
-    raise RuntimeError("Google service account credentials not found!")
+    raise RuntimeError("Google service account not found!")
 
 service_account_info = load_service_account()
-CREDS = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
+CREDS = Credentials.from_service_account_info(service_account_info, scopes=[
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+])
 gc = gspread.authorize(CREDS)
 sheet = gc.open(SHEET_NAME).sheet1
+if sheet.cell(1, 1).value != "Timestamp":
+    sheet.clear()
+    sheet.append_row(["Timestamp", "Price", "Action", "PnL", "Total_PnL", "Trade Count"])
 
-# Set sheet in algo logic
-set_sheet(sheet)
+# -------------------------
+# Background loops
+# -------------------------
+TICK_INTERVAL = 90
 
-# =========================
-# BACKGROUND LOOPS
-# =========================
-def algo_loop():
-    logger.info("🚀 Algo Loop Started")
+def market_loop():
+    logger.info(f"🚀 Algo Loop Started")
     while True:
-        algo_tick()
-        import time; time.sleep(TICK_INTERVAL)
+        algo_tick(sheet)
+        time.sleep(TICK_INTERVAL)
 
-if SELF_URL:
-    start_self_ping(SELF_URL)
-else:
-    logger.warning("SELF_URL not set, self-ping disabled")
-
-# =========================
-# FASTAPI APP
-# =========================
+# -------------------------
+# FastAPI app
+# -------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    threading.Thread(target=algo_loop, daemon=True).start()
+    threading.Thread(target=market_loop, daemon=True).start()
+    threading.Thread(target=self_ping, daemon=True).start()
     yield
 
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 def status():
-    from algo_logic import price, in_trade, total_pnl, trade_count
-    return {
-        "status": "RUNNING",
-        "price": round(price, 2),
-        "in_trade": in_trade,
-        "total_pnl": round(total_pnl, 2),
-        "trade_count": trade_count
-    }
+    return {"status": "RUNNING"}
 
 @app.get("/ping")
 def ping():
-    return {"status": "alive"}
+    return {"ping": "pong"}
